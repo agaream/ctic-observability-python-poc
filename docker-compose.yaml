@@ -1,0 +1,121 @@
+services:
+    loki:
+        image: grafana/loki:3.0.0
+        command: -config.file=/etc/loki/local-config.yaml
+        ports:
+            - '3100:3100'
+    grafana-alloy:
+        image: grafana/agent:latest
+        volumes:
+            - ./config/alloy/config.yaml:/etc/agent/agent.yaml
+            - shared-logs:/var/log/containers
+        command: -config.file=/etc/agent/agent.yaml
+        depends_on:
+            - loki
+    prometheus:
+        image: prom/prometheus:v2.51.2
+        ports:
+            - '9090:9090'
+        volumes:
+            - ./config/prometheus:/workspace
+        command:
+            - --config.file=/workspace/config.yaml
+            - --enable-feature=exemplar-storage
+        depends_on:
+            - loki
+    tempo:
+        image: grafana/tempo:2.4.1
+        command:
+            [
+                '--target=all',
+                '--storage.trace.backend=local',
+                '--storage.trace.local.path=/var/tempo',
+                '--auth.enabled=false',
+            ]
+        ports:
+            - '4317:4317'
+            - '4318:4318'
+        depends_on:
+            - loki
+    grafana:
+        image: grafana/grafana:12.0.0
+        ports:
+            - '3000:3000'
+        volumes:
+            - ./config/grafana/datasources/:/etc/grafana/provisioning/datasources
+            - ./config/grafana/dashboards/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml
+            - ./config/grafana/dashboards:/etc/grafana/dashboards
+        depends_on:
+            - loki
+            - prometheus
+            - tempo
+
+    rabbitmq:
+        image: rabbitmq:3.12-management
+        container_name: rabbitmq
+        ports:
+            - "5672:5672"       # RabbitMQ messaging
+            - "15672:15672"     # Management UI
+            - "15692:15692"     # Prometheus metrics
+        environment:
+            RABBITMQ_DEFAULT_USER: guest
+            RABBITMQ_DEFAULT_PASS: guest
+        depends_on:
+            - loki
+        command: >
+            sh -c "rabbitmq-plugins enable --offline rabbitmq_prometheus &&
+                rabbitmq-server"
+
+    app-a:
+        build: ./fastapi_app/
+        ports:
+            - '8000:8000'
+        environment:
+            RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+            APP_NAME: 'app-a'
+            TARGET_ONE_HOST: 'app-b'
+            TARGET_TWO_HOST: 'app-c'
+        depends_on:
+            - grafana
+            - rabbitmq  
+        volumes:
+            - shared-logs:/var/log/containers
+        command: >
+            sh -c 'uvicorn main:app --host 0.0.0.0 --port 8000 2>&1 | tee /var/log/containers/app-a.log'
+
+    app-b:
+        build: ./fastapi_app/
+        ports:
+            - '8001:8000'
+        environment:
+            RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+            TARGET_ONE_HOST: 'app-a'
+            APP_NAME: 'app-b'
+            TARGET_TWO_HOST: 'app-c'
+        depends_on:
+            - grafana
+            - rabbitmq  
+        volumes:
+            - shared-logs:/var/log/containers
+        command: >
+            sh -c 'uvicorn main:app --host 0.0.0.0 --port 8000 2>&1 | tee /var/log/containers/app-b.log'
+            
+    app-c:
+        build: ./fastapi_app/
+        ports:
+            - '8002:8000'
+        environment:
+            RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+            TARGET_ONE_HOST: 'app-a'
+            TARGET_TWO_HOST: 'app-b'
+            APP_NAME: 'app-c'
+        depends_on:
+            - grafana
+            - rabbitmq  
+        volumes:
+            - shared-logs:/var/log/containers
+        command: >
+            sh -c 'uvicorn main:app --host 0.0.0.0 --port 8000 2>&1 | tee /var/log/containers/app-c.log'
+
+volumes:
+    shared-logs:
